@@ -1,0 +1,11 @@
+# Nexus AI - local development dependencies
+streamlit
+pandas
+numpy
+faiss-cpu
+sentence-transformers
+scikit-learn
+PyMuPDF
+python-dotenv
+google-genai
+openai

@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Secrets and environment variables
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Local databases (may contain user accounts, hashes, and audit logs)
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# User uploads and generated indexes (keep local)
+data/uploads/
+data/raw/
+data/processed/
+data/indexes/
+faiss_index/
+vector_store/
+
+# Local app/cache artifacts
+.streamlit/cache/
+.cache/
+*.log
+.DS_Store
+Thumbs.db
+
+# Test and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor settings
+.vscode/
+.idea/

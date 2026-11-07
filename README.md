@@ -1,34 +1,55 @@
 # Nexus AI — Enterprise Knowledge Assistant
 
-Nexus AI is a local, document-grounded question-answering assistant built with Streamlit. Users upload policy PDFs, the application extracts and chunks their content, indexes the chunks for semantic retrieval, and generates answers grounded in retrieved passages with page citations.
+Nexus AI is a local, document-grounded question-answering assistant built with Streamlit. Users can upload policy PDFs, extract and chunk their content, index document passages for semantic retrieval, and generate contextual answers grounded in retrieved information with page-level citations.
 
-> **Project/demo notice:** Nexus AI is an academic/portfolio prototype. The sample Nexus Labs policy documents used during testing are fictional. Do not upload confidential company documents or expose credentials in a public repository.
+> **Project/demo notice:** Nexus AI is an academic and portfolio prototype. The sample Nexus Labs policy documents used during testing are fictional. Do not upload confidential company documents or expose credentials in a public repository.
 
 ## Features
 
 - Multi-PDF upload and processing
 - PDF text extraction and chunking
-- Embedding-based semantic retrieval with FAISS
-- LLM answer generation through Groq
+- Embedding-based semantic retrieval using FAISS
+- Multi-provider answer generation using **Google Gemini, Groq, OpenRouter, and a local extractive fallback**
 - Page-based source citations and retrieved-source inspection
-- Document metadata for department and access level
-- Role-based access filtering (including Admin access)
-- Streamlit user interface
+- Document metadata management for departments and access levels
+- Role-based access filtering, including administrator access
+- Streamlit-based user interface
+- Context-aware answers grounded in retrieved document passages
 
 ## Architecture
 
 ![Nexus AI architecture](docs/architecture.png)
 
-A detailed diagram is available at [`docs/architecture.png`](docs/architecture.png).
+A detailed architecture diagram is available at [`docs/architecture.png`](docs/architecture.png).
 
-## Technology stack
+## Technology Stack
 
-- Python
-- Streamlit
-- FAISS for vector similarity search
-- Sentence-transformer embeddings (confirm the exact model name in your configuration)
-- Groq API for answer generation
-- PDF extraction/chunking utilities
+- **Language:** Python
+- **Frontend:** Streamlit
+- **Vector Search:** FAISS
+- **Embeddings:** Sentence Transformers
+- **LLM Providers:** Google Gemini, Groq, OpenRouter
+- **Fallback Answering:** Local extractive answer generation
+- **PDF Processing:** PyMuPDF (fitz)
+- **Retrieval Pipeline:** Text chunking, embedding generation, semantic similarity search, and context-based answer generation
+
+## Answer Generation
+
+Nexus AI supports multiple answer-generation options to provide flexibility in model selection and inference:
+
+- **Google Gemini:** Generates contextual responses using retrieved document passages.
+- **Groq:** Provides LLM-based inference for document-grounded answers.
+- **OpenRouter:** Enables access to different language models through a unified API.
+- **Local Extractive Fallback:** Extracts relevant information directly from retrieved document content when an external LLM is unavailable.
+
+The assistant uses retrieved document context to support responses and provides source references where available.
+
+## Security and Access Control
+
+Nexus AI includes document-level metadata and role-based access filtering. Retrieved documents are filtered according to the user's role, department, and configured access level before being used to generate an answer.
+
+The project is intended for local demonstration and portfolio purposes, not production deployment.
+
 
 ## Local setup
 

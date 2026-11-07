@@ -2,6 +2,8 @@ import sys
 import re
 import tempfile
 import uuid
+import time
+import hashlib
 from pathlib import Path
 
 import streamlit as st
@@ -47,6 +49,8 @@ from auth import (
 )
 
 from admin_panel import show_admin_panel
+
+from admin_database import initialize_admin_tables, add_document, record_query
 
 
 # =========================================================
@@ -160,6 +164,7 @@ st.markdown(
 # INITIALIZE AUTHENTICATION
 # =========================================================
 
+initialize_admin_tables()
 initialize_auth_state()
 
 if not st.session_state.get("authenticated", False):
@@ -193,26 +198,49 @@ if not user_department:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+if "uploaded_documents" not in st.session_state:
+    # Each entry contains its own FAISS index, chunks, name, document ID,
+    # classification, and content fingerprint.
+    st.session_state.uploaded_documents = []
+
+# Backward-compatible fields are maintained for any other app code that
+# still checks the old single-document session state.
 if "uploaded_index" not in st.session_state:
     st.session_state.uploaded_index = None
-
 if "uploaded_chunks" not in st.session_state:
     st.session_state.uploaded_chunks = None
-
 if "uploaded_file_name" not in st.session_state:
     st.session_state.uploaded_file_name = None
-
 if "uploaded_document_id" not in st.session_state:
     st.session_state.uploaded_document_id = None
-
 if "uploaded_department" not in st.session_state:
     st.session_state.uploaded_department = None
-
 if "uploaded_access_level" not in st.session_state:
     st.session_state.uploaded_access_level = None
 
 if "pending_question" not in st.session_state:
     st.session_state.pending_question = None
+
+
+def _sync_legacy_uploaded_state():
+    """Keep the previous single-document state in sync for compatibility."""
+    documents = st.session_state.get("uploaded_documents", [])
+    if documents:
+        first = documents[0]
+        st.session_state.uploaded_index = first["index"]
+        st.session_state.uploaded_chunks = first["chunks"]
+        st.session_state.uploaded_file_name = first["filename"]
+        st.session_state.uploaded_document_id = first["document_id"]
+        st.session_state.uploaded_department = first["department"]
+        st.session_state.uploaded_access_level = first["access_level"]
+    else:
+        st.session_state.uploaded_index = None
+        st.session_state.uploaded_chunks = None
+        st.session_state.uploaded_file_name = None
+        st.session_state.uploaded_document_id = None
+        st.session_state.uploaded_department = None
+        st.session_state.uploaded_access_level = None
+
 
 
 # =========================================================
@@ -280,38 +308,52 @@ with st.sidebar:
         st.caption(f"Department: {user_department}")
         st.caption("Access level: Employee")
 
-    uploaded_file = st.file_uploader(
-        "Upload a PDF",
+    uploaded_files = st.file_uploader(
+        "Upload PDF documents",
         type=["pdf"],
-        help="Upload a PDF to query its contents.",
+        accept_multiple_files=True,
+        help=(
+            "Select one or more PDFs. Each file is indexed separately, "
+            "and retrieval searches across all documents in this workspace."
+        ),
+        key="multi_pdf_uploader",
     )
 
-    if st.session_state.uploaded_file_name:
+    st.caption(
+        "Each upload is classified using the department and access level "
+        "selected above."
+    )
 
-        st.success(
-            f"Active document: {st.session_state.uploaded_file_name}"
-        )
+    if st.session_state.uploaded_documents:
+        st.markdown("#### Uploaded documents")
+        for document in st.session_state.uploaded_documents:
+            with st.container(border=True):
+                st.markdown(f"**{document['filename']}**")
+                st.caption(
+                    f"{document['department']} · {document['access_level']} · "
+                    f"{len(document['chunks'])} chunks"
+                )
+                if st.button(
+                    "Remove",
+                    key=f"remove_uploaded_{document['document_id']}",
+                    use_container_width=True,
+                ):
+                    st.session_state.uploaded_documents = [
+                        item for item in st.session_state.uploaded_documents
+                        if item["document_id"] != document["document_id"]
+                    ]
+                    st.session_state.messages = []
+                    _sync_legacy_uploaded_state()
+                    st.rerun()
 
-        st.caption(
-            f"Department: {st.session_state.uploaded_department}"
-        )
-
-        st.caption(
-            f"Access level: {st.session_state.uploaded_access_level}"
-        )
-
-        if st.button(
-            "Remove uploaded document",
-            use_container_width=True,
-        ):
-            st.session_state.uploaded_index = None
-            st.session_state.uploaded_chunks = None
-            st.session_state.uploaded_file_name = None
-            st.session_state.uploaded_document_id = None
-            st.session_state.uploaded_department = None
-            st.session_state.uploaded_access_level = None
-            st.session_state.messages = []
-            st.rerun()
+    if st.session_state.uploaded_documents and st.button(
+        "Clear all uploaded documents",
+        use_container_width=True,
+    ):
+        st.session_state.uploaded_documents = []
+        st.session_state.messages = []
+        _sync_legacy_uploaded_state()
+        st.rerun()
 
     st.divider()
 
@@ -348,67 +390,93 @@ with st.sidebar:
 
 
 # =========================================================
-# PROCESS UPLOADED PDF
+# PROCESS MULTIPLE UPLOADED PDFS
 # =========================================================
 
-if uploaded_file is not None:
+if uploaded_files and st.button("Process selected PDFs", use_container_width=True):
+    existing_fingerprints = {
+        document.get("fingerprint")
+        for document in st.session_state.uploaded_documents
+    }
 
-    should_process = (
-        st.session_state.uploaded_file_name != uploaded_file.name
-        or st.session_state.uploaded_department != upload_department
-        or st.session_state.uploaded_access_level != upload_access_level
-    )
+    new_files = []
+    for uploaded_file in uploaded_files:
+        file_bytes = uploaded_file.getvalue()
+        fingerprint = hashlib.sha256(file_bytes).hexdigest()
+        if fingerprint not in existing_fingerprints:
+            new_files.append((uploaded_file, file_bytes, fingerprint))
 
-    if should_process:
+    if new_files:
+        successful_documents = []
+        failed_documents = []
 
-        temp_pdf_path = None
+        progress = st.progress(0, text="Preparing PDF documents...")
+        for file_number, (uploaded_file, file_bytes, fingerprint) in enumerate(new_files, start=1):
+            temp_pdf_path = None
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+                    temp_file.write(file_bytes)
+                    temp_pdf_path = temp_file.name
 
-        try:
-            with tempfile.NamedTemporaryFile(
-                delete=False,
-                suffix=".pdf",
-            ) as temp_file:
+                document_id = str(uuid.uuid4())
+                with st.spinner(f"Processing {uploaded_file.name} ({file_number}/{len(new_files)})..."):
+                    index, chunks = build_uploaded_store(
+                        temp_pdf_path,
+                        document_id=document_id,
+                        department=upload_department,
+                        access_level=upload_access_level,
+                    )
 
-                temp_file.write(uploaded_file.getvalue())
-                temp_pdf_path = temp_file.name
+                # Preserve the original upload filename in chunk metadata,
+                # rather than the temporary filesystem name.
+                for chunk in chunks:
+                    chunk["filename"] = uploaded_file.name
 
-            document_id = str(uuid.uuid4())
-
-            with st.spinner("Processing uploaded PDF..."):
-
-                index, chunks = build_uploaded_store(
-                    temp_pdf_path,
-                    document_id=document_id,
+                add_document(
+                    filename=uploaded_file.name,
+                    uploaded_by=user_email or user_name,
                     department=upload_department,
                     access_level=upload_access_level,
+                    file_type="PDF",
                 )
 
-            st.session_state.uploaded_index = index
-            st.session_state.uploaded_chunks = chunks
-            st.session_state.uploaded_file_name = uploaded_file.name
-            st.session_state.uploaded_document_id = document_id
-            st.session_state.uploaded_department = upload_department
-            st.session_state.uploaded_access_level = upload_access_level
+                successful_documents.append({
+                    "index": index,
+                    "chunks": chunks,
+                    "filename": uploaded_file.name,
+                    "document_id": document_id,
+                    "department": upload_department,
+                    "access_level": upload_access_level,
+                    "fingerprint": fingerprint,
+                })
 
+            except Exception as error:
+                failed_documents.append((uploaded_file.name, str(error)))
+                print(f"PDF processing error for {uploaded_file.name}:", error)
+            finally:
+                if temp_pdf_path and Path(temp_pdf_path).exists():
+                    try:
+                        Path(temp_pdf_path).unlink()
+                    except OSError:
+                        pass
+
+            progress.progress(file_number / len(new_files), text=f"Processed {file_number}/{len(new_files)} selected PDF(s)")
+
+        if successful_documents:
+            st.session_state.uploaded_documents.extend(successful_documents)
+            _sync_legacy_uploaded_state()
             st.session_state.messages = []
-
             st.success(
-                f"Processed {uploaded_file.name} — "
-                f"{len(chunks)} chunks created."
+                f"Successfully processed {len(successful_documents)} PDF(s). "
+                f"Added {sum(len(doc['chunks']) for doc in successful_documents)} chunks."
             )
 
-        except Exception as error:
+        if failed_documents:
+            st.warning("Some PDFs could not be processed:")
+            for filename, error_message in failed_documents:
+                st.error(f"{filename}: {error_message}")
 
-            st.error("Could not process this PDF.")
-            st.exception(error)
-
-        finally:
-
-            if temp_pdf_path and Path(temp_pdf_path).exists():
-                try:
-                    Path(temp_pdf_path).unlink()
-                except OSError:
-                    pass
+        st.rerun()
 
 
 # =========================================================
@@ -542,18 +610,35 @@ def retrieve_sources(search_query):
         # Uploaded PDF retrieval
         # ---------------------------------------------
 
-        if st.session_state.uploaded_index is not None:
+        if st.session_state.uploaded_documents:
+            # Retrieve from each document's independent FAISS index, then
+            # merge and rank by similarity. Permissions are enforced within
+            # retrieve_from_uploaded_store before text is returned.
+            combined_sources = []
+            for document in st.session_state.uploaded_documents:
+                document_sources = retrieve_from_uploaded_store(
+                    search_query,
+                    document["index"],
+                    document["chunks"],
+                    top_k=3,
+                    user_role=user_role,
+                    user_department=user_department,
+                )
+                for source in document_sources:
+                    source = dict(source)
+                    source.setdefault("filename", document["filename"])
+                    source.setdefault("document_id", document["document_id"])
+                    combined_sources.append(source)
 
-            sources = retrieve_from_uploaded_store(
-                search_query,
-                st.session_state.uploaded_index,
-                st.session_state.uploaded_chunks,
-                top_k=3,
-                user_role=user_role,
-                user_department=user_department,
+            combined_sources.sort(
+                key=lambda source: float(source.get("score", 0) or 0),
+                reverse=True,
             )
-
-            document_name = st.session_state.uploaded_file_name
+            sources = combined_sources[:5]
+            document_name = ", ".join(
+                document["filename"]
+                for document in st.session_state.uploaded_documents
+            )
 
         # ---------------------------------------------
         # Default employee handbook retrieval
@@ -563,7 +648,7 @@ def retrieve_sources(search_query):
 
             sources = retrieve_documents(
                 search_query,
-                top_k=3,
+                top_k=5,
                 user_role=user_role,
                 user_department=user_department,
             )
@@ -603,7 +688,7 @@ def get_answer(
         # Sources have already been access-filtered.
         # ---------------------------------------------
 
-        if st.session_state.uploaded_index is not None:
+        if st.session_state.uploaded_documents:
 
             answer = generate_answer_from_context(
                 question,
@@ -755,6 +840,8 @@ if user_input:
 
         for question in questions:
 
+            query_start_time = time.perf_counter()
+
             # Save conversation history before current question.
             conversation_history = (
                 st.session_state.messages.copy()
@@ -817,7 +904,7 @@ if user_input:
                         ):
 
                             st.markdown(
-                                f"**Source {i} — Page "
+                                f"**Source {i} — {source.get('filename', document_name)} — Page "
                                 f"{source.get('page', '?')}**  \n"
                                 f"Relevance score: "
                                 f"`{source.get('score', 0):.3f}`"
@@ -844,6 +931,17 @@ if user_input:
 
                 # Get provider.
                 provider_name = get_last_provider()
+
+                # Record analytics once per question, including generation duration.
+                try:
+                    record_query(
+                        username=user_email or user_name,
+                        query=question,
+                        provider=str(provider_name or "Unknown"),
+                        response_time=time.perf_counter() - query_start_time,
+                    )
+                except Exception as error:
+                    print("Query analytics recording error:", error)
 
                 st.markdown(answer)
 

@@ -128,9 +128,10 @@ def retrieve_from_uploaded_store(
     question,
     index,
     chunks,
-    top_k=3,
+    top_k=5,
     user_role="Employee",
     user_department="All",
+    max_per_page=2,
 ):
     """
     Search an uploaded PDF's FAISS index.
